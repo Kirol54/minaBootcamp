@@ -16,7 +16,7 @@ import {
   Circuit,
   Bool,
 } from 'snarkyjs';
-import { MerkleTree } from './merkleMock';
+import { MerkleTree } from './merkleMock.js';
 import { create, CID } from 'ipfs-http-client';
 
 /**
@@ -124,9 +124,9 @@ export default class JarOfPickles extends SmartContract {
     //increase the counter
     this.indexOfNextUser.set(stateIndex.add(1));
 
-    // save sendTo into merkle tree
     //
-    // let (merkleRoot, merkleNodes) = new MerkleTree()
+    // ======== mock code here ========
+    // need to use merkle trees corrrectly from snarkyjs
     let serializedTree;
     for await (const file of ipfs.cat(cid)) {
       serializedTree = JSON.parse(file.toString());
@@ -140,6 +140,8 @@ export default class JarOfPickles extends SmartContract {
     const view2 = new DataView(res.cid.bytes.buffer);
     let uintOfCID2 = view2.getUint32(0);
     this.merkleIPFS.set(Field(uintOfCID2));
+    // ======== mock code here ========
+    //
     //unlock if the last user deposited
     const shouldUnlock = Circuit.if(
       (counter == whiteList.length - 1).valueOf(),
@@ -150,19 +152,32 @@ export default class JarOfPickles extends SmartContract {
     this.isClaimable.set(shouldUnlock);
     this.balance.addInPlace(await this.GetValue());
   }
-  @method async claim(pubkey: PublicKey, x: Field, signature: Signature) {
+  @method async claim(
+    pubkey: PublicKey,
+    x: Field,
+    signature: Signature,
+    secretHash: Field
+  ) {
     // make sure if it's claimable
     const isClaimable = await this.isClaimable.get();
     isClaimable.assertEquals(true);
     //verify that owner of the pub key is sending the tx
     signature.verify(pubkey, [x]).assertEquals(true);
 
-    //verify that the account is in the merkle leaf
+    //verify that the secretHash is in the merkle leaf
     // get nodes from ipfs
-    // const ipfs = create({ host: '127.0.0.1', port: 5002 });
-    // for await (const file of ipfs.cat(cid)) {
-    //   whiteList = JSON.parse(file.toString());
-    // }
+
+    // ======== mock code here ========
+    const ipfs = create({ host: '127.0.0.1', port: 5002 });
+    let cid = this.merkleIPFS.get().convertIntoCID();
+    let serializedTree;
+    for await (const file of ipfs.cat(cid)) {
+      serializedTree = JSON.parse(file.toString());
+    }
+    let deserializedTree = serializedTree.convert();
+
+    // ======== mock code here ========
+
     this.balance.subInPlace(await this.GetValue());
   }
 
@@ -250,6 +265,7 @@ export async function run() {
     .wait();
 
   //deposit as acc 2-5
+  let secretNumber = 1337;
   let depositAcc = [account2, account3, account4, account5];
   for (const account in depositAcc) {
     await Mina.transaction(account1, async () => {
@@ -257,7 +273,7 @@ export async function run() {
       const signature = Signature.create(depositAcc[account], [x]);
       const p = await Party.createSigned(depositAcc[account]);
       p.balance.subInPlace(UInt64.fromNumber(depositAmount));
-      let secretNumber = 1337;
+
       await snappInstance.deposit(
         depositAcc[account].toPublicKey(),
         x,
@@ -273,7 +289,12 @@ export async function run() {
     const x = Field.zero;
     const signature = Signature.create(accountX, [x]);
 
-    await snappInstance.claim(accountX.toPublicKey(), x, signature);
+    await snappInstance.claim(
+      accountX.toPublicKey(),
+      x,
+      signature,
+      Poseidon.hash([Field(secretNumber)])
+    );
 
     const p = Party.createUnsigned(accountX.toPublicKey());
 
