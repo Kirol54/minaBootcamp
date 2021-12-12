@@ -15,14 +15,12 @@ import {
   Signature,
   Circuit,
   Bool,
-  DataStore,
-  MerkleProofFactory,
 } from 'snarkyjs';
-
+import { MerkleTree } from './merkleMock';
 import { create, CID } from 'ipfs-http-client';
 
 /**
- * JarOfPickles
+ *  JarOfPickles
  */
 
 export default class JarOfPickles extends SmartContract {
@@ -31,6 +29,7 @@ export default class JarOfPickles extends SmartContract {
   @state(Field) indexOfNextUser: State<Field>;
   @state(Field) value: State<Field>;
   @state(Bool) isClaimable: State<Bool>;
+  @state(Field) merkleIPFS: State<Field>;
 
   constructor(
     initialBalance: UInt64,
@@ -44,6 +43,7 @@ export default class JarOfPickles extends SmartContract {
     this.indexOfNextUser = State.init(Field.zero);
     this.value = State.init(Field.zero);
     this.isClaimable = State.init(Bool(false));
+    this.merkleIPFS = State.init(Field.zero);
   }
 
   @method async updateWhiteList(
@@ -51,21 +51,33 @@ export default class JarOfPickles extends SmartContract {
     owner: PublicKey,
     x: Field,
     signature: Signature,
-    hashCID: Field
+    hashCID: Field,
+    size: number
   ) {
     //verify that owner of the pub key is sending the tx
     signature.verify(owner, [x]).assertEquals(true);
     //verify that caller is owner
     owner.equals(this.ownerAddr).assertEquals(true);
+    let merkleTree = this.createMerkleTree(size);
+    let wholeTree = merkleTree.serialiseTree();
+    const ipfs = create({ host: '127.0.0.1', port: 5002 });
+    let res = await ipfs.add(Buffer.from(wholeTree));
+    const view = new DataView(res.cid.bytes.buffer);
+    let uintOfCID = view.getUint32(0);
+    this.merkleIPFS.set(Field(uintOfCID));
     this.ipfsWhiteList.set(hashCID);
     this.value.set(value);
+  }
+
+  createMerkleTree(size: number): MerkleTree<Field> {
+    return new MerkleTree(size);
   }
 
   @method async deposit(
     pubkey: PublicKey,
     x: Field,
     signature: Signature,
-    sendTo: PublicKey,
+    secret: number,
     cid: CID
   ) {
     // verify if the whitelist is set
@@ -113,10 +125,21 @@ export default class JarOfPickles extends SmartContract {
     this.indexOfNextUser.set(stateIndex.add(1));
 
     // save sendTo into merkle tree
+    //
+    // let (merkleRoot, merkleNodes) = new MerkleTree()
+    let serializedTree;
+    for await (const file of ipfs.cat(cid)) {
+      serializedTree = JSON.parse(file.toString());
+    }
+    let deserializedTree = serializedTree.convert();
+    deserializedTree.addLeaf(Poseidon.hash([Field(secret)]));
 
+    let newTree = deserializedTree.serializedTree();
     // add nodes to ipfs
-    // await ipfs.add(Buffer.from(JSON.stringify(MerkleNodes)));
-
+    let res = await ipfs.add(Buffer.from(newTree));
+    const view2 = new DataView(res.cid.bytes.buffer);
+    let uintOfCID2 = view2.getUint32(0);
+    this.merkleIPFS.set(Field(uintOfCID2));
     //unlock if the last user deposited
     const shouldUnlock = Circuit.if(
       (counter == whiteList.length - 1).valueOf(),
@@ -219,83 +242,33 @@ export async function run() {
       account1.toPublicKey(),
       x,
       signature,
-      Poseidon.hash([Field(uintOfCID)])
-    );
-  })
-    .send()
-    .wait();
-  //deposit as acc2
-  await Mina.transaction(account1, async () => {
-    const x = Field.zero;
-    const signature = Signature.create(account2, [x]);
-    const p = await Party.createSigned(account2);
-    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
-
-    await snappInstance.deposit(
-      account2.toPublicKey(),
-      x,
-      signature,
-      accountX.toPublicKey(),
-      rawCID
+      Poseidon.hash([Field(uintOfCID)]),
+      whiteListArray.length
     );
   })
     .send()
     .wait();
 
-  //deposit as acc3
-  await Mina.transaction(account1, async () => {
-    const x = Field.zero;
-    const signature = Signature.create(account3, [x]);
-    const p = await Party.createSigned(account3);
-    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
-
-    await snappInstance.deposit(
-      account3.toPublicKey(),
-      x,
-      signature,
-      accountX.toPublicKey(),
-      rawCID
-    );
-  })
-    .send()
-    .wait();
-
-  // deposit as acc4
-  await Mina.transaction(account1, async () => {
-    const x = Field.zero;
-    const signature = Signature.create(account4, [x]);
-    const p = await Party.createSigned(account4);
-    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
-
-    await snappInstance.deposit(
-      account4.toPublicKey(),
-      x,
-      signature,
-      accountX.toPublicKey(),
-      rawCID
-    );
-  })
-    .send()
-    .wait();
-
-  // deposit as acc5
-  await Mina.transaction(account1, async () => {
-    const x = Field.zero;
-    const signature = Signature.create(account5, [x]);
-    const p = await Party.createSigned(account5);
-    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
-
-    await snappInstance.deposit(
-      account5.toPublicKey(),
-      x,
-      signature,
-      accountX.toPublicKey(),
-      rawCID
-    );
-  })
-    .send()
-    .wait();
-
+  //deposit as acc 2-5
+  let depositAcc = [account2, account3, account4, account5];
+  for (const account in depositAcc) {
+    await Mina.transaction(account1, async () => {
+      const x = Field.zero;
+      const signature = Signature.create(depositAcc[account], [x]);
+      const p = await Party.createSigned(depositAcc[account]);
+      p.balance.subInPlace(UInt64.fromNumber(depositAmount));
+      let secretNumber = 1337;
+      await snappInstance.deposit(
+        depositAcc[account].toPublicKey(),
+        x,
+        signature,
+        secretNumber,
+        rawCID
+      );
+    })
+      .send()
+      .wait();
+  }
   await Mina.transaction(account1, async () => {
     const x = Field.zero;
     const signature = Signature.create(accountX, [x]);
@@ -319,25 +292,28 @@ export async function run() {
   //   .wait();
 
   const a = await Mina.getAccount(snappPubkey);
-  console.log('snapp balance', (await Mina.getBalance(snappPubkey)).toString());
+  console.log(
+    'snapp balance: ',
+    (await Mina.getBalance(snappPubkey)).toString()
+  );
   // console.log(
   //   'acc1 balance : ',
   //   (await Mina.getBalance(account1.toPublicKey())).toString()
   // );
   console.log(
-    'acc2 balance : ',
+    'acc2 balance: ',
     (await Mina.getBalance(account2.toPublicKey())).toString()
   );
   console.log(
-    'acc3 balance : ',
+    'acc3 balance: ',
     (await Mina.getBalance(account3.toPublicKey())).toString()
   );
   console.log(
-    'acc4 balance : ',
+    'acc4 balance: ',
     (await Mina.getBalance(account4.toPublicKey())).toString()
   );
   console.log(
-    'accX balance : ',
+    'accX balance: ',
     (await Mina.getBalance(accountX.toPublicKey())).toString()
   );
 
