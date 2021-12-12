@@ -15,19 +15,22 @@ import {
   Signature,
   Circuit,
   Bool,
+  DataStore,
+  MerkleProofFactory,
 } from 'snarkyjs';
 
 import { create, CID } from 'ipfs-http-client';
 
 /**
- * StirThePickles
+ * JarOfPickles
  */
 
-export default class StirThePickles extends SmartContract {
+export default class JarOfPickles extends SmartContract {
   ownerAddr: PublicKey;
   @state(Field) ipfsWhiteList: State<Field>;
   @state(Field) indexOfNextUser: State<Field>;
   @state(Field) value: State<Field>;
+  @state(Bool) isClaimable: State<Bool>;
 
   constructor(
     initialBalance: UInt64,
@@ -40,6 +43,7 @@ export default class StirThePickles extends SmartContract {
     this.ipfsWhiteList = State.init(Field.zero);
     this.indexOfNextUser = State.init(Field.zero);
     this.value = State.init(Field.zero);
+    this.isClaimable = State.init(Bool(false));
   }
 
   @method async updateWhiteList(
@@ -49,7 +53,9 @@ export default class StirThePickles extends SmartContract {
     signature: Signature,
     hashCID: Field
   ) {
+    //verify that owner of the pub key is sending the tx
     signature.verify(owner, [x]).assertEquals(true);
+    //verify that caller is owner
     owner.equals(this.ownerAddr).assertEquals(true);
     this.ipfsWhiteList.set(hashCID);
     this.value.set(value);
@@ -62,22 +68,26 @@ export default class StirThePickles extends SmartContract {
     sendTo: PublicKey,
     cid: CID
   ) {
-    //verify if the whitelist is set
+    // verify if the whitelist is set
     const whiteListCID = await this.ipfsWhiteList.get();
     whiteListCID.equals(Field.zero).assertEquals(false);
+
     //verify that owner of the pub key is sending the tx
     signature.verify(pubkey, [x]).assertEquals(true);
+
     // validate hash of the CID matches hash of CID provided by the owner
     const view = new DataView(cid.bytes.buffer);
     let uintOfCID = view.getUint32(0);
     Poseidon.hash([Field(uintOfCID)])
       .equals(whiteListCID)
       .assertEquals(true);
+
+    // If I'd know how to use this:
+    // DataStore.IPFS(Field.zero, ipfsHash);
     // pull whitelist from ipfs
     let whiteList = [];
     const ipfs = create({ host: '127.0.0.1', port: 5002 });
     for await (const file of ipfs.cat(cid)) {
-      console.log('return:');
       whiteList = JSON.parse(file.toString());
     }
     // get state of the counter, so the deposits can happen in order
@@ -86,6 +96,8 @@ export default class StirThePickles extends SmartContract {
     Circuit.asProver(() => {
       counter = parseInt(stateIndex.toString());
     });
+    stateIndex.assertLte(whiteList.length);
+
     //bool workaround to validate if it's caller's time to deposit
     let isWhitelistedCheck = (
       JSON.stringify(whiteList[counter]) == JSON.stringify(pubkey.toJSON())
@@ -96,42 +108,51 @@ export default class StirThePickles extends SmartContract {
       new Bool(false)
     );
     isWhitelisted.assertEquals(true);
-    // substract agreed value
 
+    //increase the counter
+    this.indexOfNextUser.set(stateIndex.add(1));
+
+    // save sendTo into merkle tree
+
+    // add nodes to ipfs
+    // await ipfs.add(Buffer.from(JSON.stringify(MerkleNodes)));
+
+    //unlock if the last user deposited
+    const shouldUnlock = Circuit.if(
+      (counter == whiteList.length - 1).valueOf(),
+      new Bool(true),
+      new Bool(false)
+    );
+
+    this.isClaimable.set(shouldUnlock);
+    this.balance.addInPlace(await this.GetValue());
+  }
+  @method async claim(pubkey: PublicKey, x: Field, signature: Signature) {
+    // make sure if it's claimable
+    const isClaimable = await this.isClaimable.get();
+    isClaimable.assertEquals(true);
+    //verify that owner of the pub key is sending the tx
+    signature.verify(pubkey, [x]).assertEquals(true);
+
+    //verify that the account is in the merkle leaf
+    // get nodes from ipfs
+    // const ipfs = create({ host: '127.0.0.1', port: 5002 });
+    // for await (const file of ipfs.cat(cid)) {
+    //   whiteList = JSON.parse(file.toString());
+    // }
+    this.balance.subInPlace(await this.GetValue());
+  }
+
+  async GetValue(): Promise<UInt64> {
     let value = 0;
     const valueState = await this.value.get();
     Circuit.asProver(() => {
       value = parseInt(valueState.toString());
     });
-    this.balance.addInPlace(UInt64.fromNumber(value));
-  }
-  @method async claim() {
-    // const ipfs = create({ host: '127.0.0.1', port: 5002 });
-    // for await (const file of ipfs.cat(cid)) {
-    //   console.log('return:');
-    //   console.log(JSON.parse(file.toString()));
-    // }
+    return UInt64.fromNumber(value);
   }
 }
 
-// export class Snapp extends SmartContract {
-//   @state(Field) indexOfNextUser: State<Field>;
-
-//   constructor(initialBalance: UInt64, address: PublicKey) {
-//     super(address);
-//     this.balance.addInPlace(initialBalance);
-//     this.indexOfNextUser = State.init(Field(0));
-//   }
-//   @method async get() {
-//     const hardIndex = Field(5);
-//     console.log('hardIndex:', hardIndex.toString());
-//     /// return '5'
-
-//     const stateIndex = await this.indexOfNextUser.get();
-//     console.log('stateIndex: ', stateIndex);
-//     // ERROR :rejection
-//   }
-// }
 // ===================================================================================================
 // ===================================================================================================
 // ===================================================================================================
@@ -151,36 +172,15 @@ export async function run() {
   const snappPrivkey = PrivateKey.random();
   const snappPubkey = snappPrivkey.toPublicKey();
 
-  let snappInstance: StirThePickles;
-  let whiteListArray = [
-    account2.toPublicKey(),
-    account3.toPublicKey(),
-    account4.toPublicKey(),
-    account5.toPublicKey(),
-  ];
-
-  const ipfs = create({ host: '127.0.0.1', port: 5002 });
-
-  let res = await ipfs.add(Buffer.from(JSON.stringify(whiteListArray)));
-
-  let rawCID = res.cid;
-  let stringCID = rawCID.toString();
-  console.log('CID: ', stringCID);
-  let whitelistCID1 = rawCID.bytes;
-  const view = new DataView(whitelistCID1.buffer);
-  let uintOfCID = view.getUint32(0);
-  console.log('CID as decimal ', uintOfCID);
-  // Deploys the snapp
-  let depositAmount = 10;
-  let value = Field(depositAmount);
-
+  let snappInstance: JarOfPickles;
+  //deploy the snapp
   await Mina.transaction(account1, async () => {
     // account2 sends 1000000000 to the new snapp account
-    const amount = UInt64.fromNumber(2000000000);
+    const amount = UInt64.fromNumber(2001000000);
     const p = await Party.createSigned(account2);
     p.balance.subInPlace(amount);
 
-    snappInstance = new StirThePickles(
+    snappInstance = new JarOfPickles(
       amount,
       snappPubkey,
       account1.toPublicKey()
@@ -188,9 +188,30 @@ export async function run() {
   })
     .send()
     .wait();
+  //create whitelist
+  let whiteListArray = [
+    account2.toPublicKey(),
+    account3.toPublicKey(),
+    account4.toPublicKey(),
+    account5.toPublicKey(),
+  ];
+  //upload to IPFS
+  const ipfs = create({ host: '127.0.0.1', port: 5002 });
+  let res = await ipfs.add(Buffer.from(JSON.stringify(whiteListArray)));
+  // workaround to store it in a field element
+  let rawCID = res.cid;
+  let stringCID = rawCID.toString();
+  console.log('CID: ', stringCID);
+  let whitelistCID1 = rawCID.bytes;
+  const view = new DataView(whitelistCID1.buffer);
+  let uintOfCID = view.getUint32(0);
+  console.log('CID as decimal ', uintOfCID);
+
+  let depositAmount = 1000000;
+  let value = Field(depositAmount);
+
   // updates whitelist
   await Mina.transaction(account1, async () => {
-    // 27 = 3^3
     const x = Field.zero;
     const signature = Signature.create(account1, [x]);
     await snappInstance.updateWhiteList(
@@ -203,9 +224,8 @@ export async function run() {
   })
     .send()
     .wait();
-
-  await Mina.transaction(account2, async () => {
-    // 27 = 3^3
+  //deposit as acc2
+  await Mina.transaction(account1, async () => {
     const x = Field.zero;
     const signature = Signature.create(account2, [x]);
     const p = await Party.createSigned(account2);
@@ -222,7 +242,104 @@ export async function run() {
     .send()
     .wait();
 
+  //deposit as acc3
+  await Mina.transaction(account1, async () => {
+    const x = Field.zero;
+    const signature = Signature.create(account3, [x]);
+    const p = await Party.createSigned(account3);
+    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
+
+    await snappInstance.deposit(
+      account3.toPublicKey(),
+      x,
+      signature,
+      accountX.toPublicKey(),
+      rawCID
+    );
+  })
+    .send()
+    .wait();
+
+  // deposit as acc4
+  await Mina.transaction(account1, async () => {
+    const x = Field.zero;
+    const signature = Signature.create(account4, [x]);
+    const p = await Party.createSigned(account4);
+    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
+
+    await snappInstance.deposit(
+      account4.toPublicKey(),
+      x,
+      signature,
+      accountX.toPublicKey(),
+      rawCID
+    );
+  })
+    .send()
+    .wait();
+
+  // deposit as acc5
+  await Mina.transaction(account1, async () => {
+    const x = Field.zero;
+    const signature = Signature.create(account5, [x]);
+    const p = await Party.createSigned(account5);
+    p.balance.subInPlace(UInt64.fromNumber(depositAmount));
+
+    await snappInstance.deposit(
+      account5.toPublicKey(),
+      x,
+      signature,
+      accountX.toPublicKey(),
+      rawCID
+    );
+  })
+    .send()
+    .wait();
+
+  await Mina.transaction(account1, async () => {
+    const x = Field.zero;
+    const signature = Signature.create(accountX, [x]);
+
+    await snappInstance.claim(accountX.toPublicKey(), x, signature);
+
+    const p = Party.createUnsigned(accountX.toPublicKey());
+
+    p.balance.addInPlace(UInt64.fromNumber(depositAmount));
+  })
+    .send()
+    .wait();
+
+  // await Mina.transaction(account1, async () => {
+  //   const p = await Party.createSigned(account3);
+
+  //   p.balance.subInPlace(UInt64.fromNumber(depositAmount));
+  //   await snappInstance.claim();
+  // })
+  //   .send()
+  //   .wait();
+
   const a = await Mina.getAccount(snappPubkey);
+  console.log('snapp balance', (await Mina.getBalance(snappPubkey)).toString());
+  // console.log(
+  //   'acc1 balance : ',
+  //   (await Mina.getBalance(account1.toPublicKey())).toString()
+  // );
+  console.log(
+    'acc2 balance : ',
+    (await Mina.getBalance(account2.toPublicKey())).toString()
+  );
+  console.log(
+    'acc3 balance : ',
+    (await Mina.getBalance(account3.toPublicKey())).toString()
+  );
+  console.log(
+    'acc4 balance : ',
+    (await Mina.getBalance(account4.toPublicKey())).toString()
+  );
+  console.log(
+    'accX balance : ',
+    (await Mina.getBalance(accountX.toPublicKey())).toString()
+  );
 
   // console.log('Exercise 1');
   console.log('final state value', a.snapp.appState[0].toString());

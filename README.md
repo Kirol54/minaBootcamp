@@ -1,6 +1,10 @@
-# Mina Snapp: Minabootcamp
+# Mina Snapp: Stir with JarOfPickles
 
-This template uses TypeScript.
+A concept for coin tumbler on Mina.
+
+Using whitelist to ensure 'locking' so no concurrent update to the merkle tree is possible.
+
+Storing the whitelist on the IPFS.
 
 ## How to build
 
